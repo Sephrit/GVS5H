@@ -11,6 +11,10 @@ transcript.jsonl
 # alongside runs/patched_verdicts.json, which is the file the charts read.
 runs/patched_grader/
 
+# Local LM Studio trial: plumbing smoke runs and results still being written.
+runs/smoke/
+*.json.tmp
+
 # Local spec checker: measures the built figures and manuscript against the
 # Nature figure/formatting guides. A working tool, not part of the paper.
 paper_plot_script/check_nature_specs.py
