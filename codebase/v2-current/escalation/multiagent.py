@@ -2,6 +2,10 @@
 Multi-agent collaborative solver: a primary manager plus worker subagents, coordinating over a shared workspace. 
 
 Every role is the same model invoked in a fresh context.
+
+A spec may set artifact / lang / domain / check_name / verify to point the same loop at a task
+other than LiveCodeBench (build_game.py does, for a single-file browser game). With none of
+them set, prompts and behaviour are unchanged.
 """
 
 import os
@@ -118,8 +122,8 @@ def _bullets(text):
     return items
 
 
-def _extract_py(text):
-    m = re.search(r"```(?:python)?\s*\n(.*?)```", _strip_think(text), re.DOTALL)
+def _extract_py(text, lang="python"):
+    m = re.search(r"```(?:" + re.escape(lang) + r")?\s*\n(.*?)```", _strip_think(text), re.DOTALL)
     return m.group(1).strip() if m else ""
 
 
@@ -143,10 +147,15 @@ MAX_ANSWER_CHARS = 20000
 MAX_PLAN_CHARS = 4000
 
 
+def _artifact(spec):
+    """The file code workers write: solution.py unless the spec names another."""
+    return spec.get("artifact", "solution.py")
+
+
 def _has_answer(ws, spec):
     """True if the workspace already holds a usable final artifact."""
     if spec["kind"] == "code":
-        return bool(_read(ws, "solution.py").strip())
+        return bool(_read(ws, _artifact(spec)).strip())
     return bool(ANS_RE.search(_read(ws, "answer.md")))
 
 
@@ -171,7 +180,7 @@ def _primary_plan(problem, spec, ws, log):
     kind = spec["kind"]
     sys = (
         "You are the PRIMARY orchestrator (manager) of a small team of workers, all "
-        f"expert at {'competitive programming' if kind == 'code' else 'olympiad mathematics'}. "
+        f"expert at {spec.get('domain') or ('competitive programming' if kind == 'code' else 'olympiad mathematics')}. "
         "Given a problem, produce a short overarching plan to solve it, then a task list "
         "the workers can pick up. Respond with EXACTLY these sections:\n"
         "### PLAN\n<3-6 sentence strategy>\n"
@@ -217,7 +226,8 @@ def _ideation_worker(problem, spec, ws, log):
 
 def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
     kind = spec["kind"]
-    cur = _read(ws, "solution.py" if kind == "code" else "answer.md").strip()
+    check = spec.get("check_name", "SAMPLE TESTS")
+    cur = _read(ws, _artifact(spec) if kind == "code" else "answer.md").strip()
     task_lines = "\n".join(
         f"- [{'done' if t['status'] == 'done' else 'todo'}] {t['desc']}" for t in tasks
     ) or "(none)"
@@ -226,9 +236,9 @@ def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
         "You are the PRIMARY orchestrator and manager. You OWN the task list and decide "
         "when the problem is solved. Review the current progress and the latest worker's "
         "result, then:\n"
-        "- The LATEST WORKER RESULT may include a SAMPLE TESTS verdict from actually running "
+        f"- The LATEST WORKER RESULT may include a {check} verdict from actually running "
         "the code. Treat it as ground truth: only set STATUS 'done' if the solution PASSED the "
-        "sample tests; if it FAILED, you MUST set STATUS 'continue' and choose a task that "
+        f"{check.lower()}; if it FAILED, you MUST set STATUS 'continue' and choose a task that "
         "fixes the failing case or switches to a different approach.\n"
         "- If the current solution/answer is complete and correct, set STATUS to 'done'.\n"
         "- Otherwise CURATE the task list: merge duplicates, drop finished or irrelevant "
@@ -289,7 +299,8 @@ def _summarize_cutoff(ws, reply, task_desc):
 
 def _worker(problem, spec, ws, task, log, finalize=False):
     kind = spec["kind"]
-    cur = _read(ws, "solution.py" if kind == "code" else "answer.md")
+    lang = spec.get("lang", "python")
+    cur = _read(ws, _artifact(spec) if kind == "code" else "answer.md")
     notes_fmt = (
         "### NOTES\n<the COMPLETE notes file, rewritten. You are shown the current NOTES "
         "above: fold your findings into them, keep what still matters, and DELETE anything "
@@ -300,7 +311,7 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     )
     if kind == "code":
         out_fmt = (
-            "### CODE\n```python\n<the FULL updated self-contained program>\n```\n"
+            f"### CODE\n```{lang}\n<the FULL updated self-contained program>\n```\n"
             + notes_fmt +
             "### NEXT\n<bullet list of remaining steps, or 'none'>\n### STATUS\n<solved|continue>"
         )
@@ -334,9 +345,9 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     sec = _sections(reply)
     wrote = False
     if kind == "code":
-        code = _extract_py(sec.get("CODE", "")) or _extract_py(reply)
+        code = _extract_py(sec.get("CODE", ""), lang) or _extract_py(reply, lang)
         if code:
-            _write(ws, "solution.py", code)
+            _write(ws, _artifact(spec), code)
             wrote = True
     else:
         ans = sec.get("ANSWER", "").strip()
@@ -414,7 +425,7 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
     ws = os.path.join(WS_ROOT, _slug(problem_text))
     os.makedirs(ws, exist_ok=True)
     for f in ("task.md", "notes.md", "transcript.jsonl", "plan.md",
-              "solution.py", "answer.md", "tasks.json"):
+              "solution.py", "answer.md", "tasks.json", _artifact(spec)):
         _write(ws, f, "")
     _write(ws, "task.md", problem_text)
     _record(ws, {"_meta": True, "t": time.time(), "model": MODEL,
@@ -436,11 +447,12 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         task = {"id": iters, "desc": next_desc, "status": "in_progress", "result": ""}
         _, nexts, summary, wrote = _worker(problem_text, spec, ws, task, log)
         res = None
-        if spec["kind"] == "code" and tests and wrote:
-            res = _run_samples(ws, tests)
+        if spec["kind"] == "code" and wrote and (tests or spec.get("verify")):
+            res = spec["verify"](ws) if spec.get("verify") else _run_samples(ws, tests)
             if res.get("ran"):
-                summary = _sample_feedback(res) + summary
-                log(f"    [samples] {res['passed']}/{res['total']} public tests passed")
+                summary = (res.get("feedback") or _sample_feedback(res)) + summary
+                log(f"    [samples] {res['passed']}/{res['total']} "
+                    f"{'checks' if spec.get('verify') else 'public tests'} passed")
         status, next_desc, tasks = _primary_manage(
             problem_text, spec, ws, tasks, nexts, summary, log)
         if res and res.get("ran") and res["passed"] < res["total"] and status == "done":
@@ -465,14 +477,14 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         status_out["finish_reason"] = recs[-1].get("finish_reason") if recs else None
         status_out["truncated_calls"] = sum(1 for r in recs if r.get("finish_reason") == "length")
         status_out["n_calls"] = len(recs)
-        final_empty = (not _read(ws, "solution.py").strip() if spec["kind"] == "code"
+        final_empty = (not _read(ws, _artifact(spec)).strip() if spec["kind"] == "code"
                        else not ANS_RE.search(_read(ws, "answer.md")))
         if final_empty and any(r.get("infra_exhausted") for r in recs):
             status_out["infra_fail"] = True
 
     if spec["kind"] == "code":
-        code = _read(ws, "solution.py")
-        return f"```python\n{code}\n```" if code else ""
+        code = _read(ws, _artifact(spec))
+        return f"```{spec.get('lang', 'python')}\n{code}\n```" if code else ""
     return _read(ws, "answer.md")
 
 
