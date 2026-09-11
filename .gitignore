@@ -15,6 +15,10 @@ runs/patched_grader/
 runs/smoke/
 *.json.tmp
 
+# Each run starts its own model server; its settings, log and prompt cache (GBs of
+# .safetensors) are local scaffolding, not results.
+runs/*/omlx/
+
 # Local spec checker: measures the built figures and manuscript against the
 # Nature figure/formatting guides. A working tool, not part of the paper.
 paper_plot_script/check_nature_specs.py
