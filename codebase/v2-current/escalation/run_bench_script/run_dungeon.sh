@@ -52,8 +52,17 @@ export MULTIAGENT_MODEL="groq:$MODEL_ID"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN/run.log"; }
 
-# --- the model server -------------------------------------------------------------------
-if ! curl -sf -m 5 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" > /dev/null; then
+# --- the model server: always ours, on a port nobody else holds ---------------------------
+# An oMLX instance left behind on this port answers the probe happily and then 404s every
+# request for a model it does not serve, so never adopt a server we did not start.
+while lsof -ti:"$OMLX_PORT" > /dev/null 2>&1; do
+  log "port $OMLX_PORT is taken, trying $((OMLX_PORT + 1))"
+  OMLX_PORT=$((OMLX_PORT + 1))
+  [ "$OMLX_PORT" -gt 8040 ] && { log "FATAL: no free port in 8010-8040"; exit 1; }
+done
+BASE="http://127.0.0.1:$OMLX_PORT/v1"
+export ESCALATION_OPENAI_BASE="$BASE/chat/completions"
+if true; then
   log "starting oMLX on port $OMLX_PORT (private settings in $ISO)"
   ln -sfn "$MODEL_DIR/$MODEL_ID" "$ISO/models/$MODEL_ID"
   python3 - "$ISO" "$OMLX_PORT" "$MODEL_ID" <<'PY'
@@ -79,13 +88,22 @@ PY
     --model-dir "$ISO/models" --port "$OMLX_PORT" --base-path "$ISO" --api-key "$OMLX_KEY" \
     > "$ISO/serve.log" 2>&1 &
   echo $! > "$ISO/serve.pid"
+  cleanup() {                     # the server is ours; oMLX's worker is a child of the CLI
+    local pid
+    pid=$(cat "$ISO/serve.pid" 2>/dev/null) || return
+    pkill -P "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null
+  }
+  trap cleanup EXIT               # never leave a server behind to confuse the next run
   for i in $(seq 120); do
     curl -sf -m 2 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" > /dev/null && break
     sleep 2
   done
 fi
-curl -sf -m 5 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" | grep -q "$MODEL_ID" \
-  || { log "FATAL: oMLX is not serving $MODEL_ID on $BASE"; exit 1; }
+# exact id match: "Qwen3.8-27B-8bit" is also a prefix of "Qwen3.8-27B-8bit-MTP"
+curl -sf -m 5 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" \
+  | MODEL_ID="$MODEL_ID" python3 -c 'import json,os,sys; ids=[m["id"] for m in json.load(sys.stdin)["data"]]; sys.exit(0 if os.environ["MODEL_ID"] in ids else 1)' \
+  || { log "FATAL: oMLX on $BASE is not serving exactly $MODEL_ID (see $ISO/serve.log)"; exit 1; }
 log "model server ready: $MODEL_ID on $BASE"
 
 caffeinate -i -w $$ &   # no idle sleep while this script runs
