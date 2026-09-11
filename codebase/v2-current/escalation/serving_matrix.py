@@ -64,12 +64,21 @@ def post(base, model, messages, max_tokens, temperature, key):
     return r, time.time() - t
 
 
+LONG_TOKENS = int(os.environ.get("LONG_TOKENS", "8000"))
+
+
 def measure(base, model, key):
     out = {}
     post(base, model, [{"role": "user", "content": "hi"}], 8, 0.2, key)      # load / warm up
     r, dt = post(base, model, [{"role": "user", "content": GAME_PROMPT}], 1500, 0.2, key)
     out["decode_tok_s"] = round(r["usage"]["completion_tokens"] / dt, 1)
     out["decode_tokens"] = r["usage"]["completion_tokens"]
+    # Short bursts flatter every backend: a real game generation ran 57k tokens at half the
+    # 1500-token rate, because decoding slows as the context it attends to grows.
+    if LONG_TOKENS:
+        r, dt = post(base, model, [{"role": "user", "content": GAME_PROMPT}], LONG_TOKENS, 0.2, key)
+        out["long_tok_s"] = round(r["usage"]["completion_tokens"] / dt, 1)
+        out["long_tokens"] = r["usage"]["completion_tokens"]
     filler = "Room notes: " + " ".join(
         f"corridor {i} joins room {i % 11} at tile ({i % 40},{i % 23})." for i in range(1400))
     r, dt = post(base, model, [{"role": "user", "content": filler + "\nReply with just OK."}], 1, 0.2, key)
