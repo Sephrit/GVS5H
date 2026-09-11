@@ -1,52 +1,98 @@
 #!/usr/bin/env bash
-# Build the dungeon game twice from one brief with the local Qwen3.8-27B in LM Studio: once
-# with a single call, once through the manager loop with a browser check between rounds.
-# When both finish, the two games are copied to runs/<tag>/play/ as dungeon-A.html and
-# dungeon-B.html in a random order, with the answer in play/.key.json, so they can be judged
-# blind. An arm whose game.html already exists is skipped on re-run.
+# Build the dungeon game once per scaffold with a local Qwen3.8-27B, then shuffle the games for
+# a blind comparison. Default scaffolds: the paper's manager loop, the same loop with no
+# browser check, one worker looped against the check, three-samples-keep-the-best, and a plain
+# single call.
 #
-# The arms run one after the other on a single-slot model. With several slots LM Studio's MLX
-# engine batches requests, and two long generations at once hit Metal's buffer-count ceiling
-# ("[metal::malloc] Resource limit (499000) exceeded") after about eight minutes, killing the
-# backend for every later call.
+# Serving: 8-bit MLX through oMLX, measured 2026-09-11 on an M5 Max with these same weights:
+#   oMLX 8-bit                32.9 tok/s   <- chosen
+#   LM Studio 4-bit MLX       28.6 tok/s
+#   LM Studio Q8 GGUF + MTP   21.7 tok/s
+#   LM Studio 8-bit MLX       17.6 tok/s
+# MTP made no difference on oMLX (32.9 with and without on the same prompt), so it stays off;
+# the MTP-grafted copy in ~/AI/Models/oMLX/sephwa/Qwen3.8-27B-8bit-MTP is kept only as a record.
+# The server runs on a private port with its own settings folder, leaving the oMLX config
+# OpenCode uses untouched, and with turboquant KV, specprefill and the thinking budget off --
+# all three trade quality for speed.
+#
+# Arms run one after another. Two concurrent streams on oMLX total 26.5 tok/s against 32.9 for
+# one, so parallelism is a loss here; LM Studio's batched MLX engine crashed outright on
+# Metal's buffer-count limit under the same load.
+#
+#   ENGINES="multiagent single" ./run_dungeon.sh        # a subset
+#   TAG=dungeon2 ./run_dungeon.sh                       # a fresh run directory
 
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1   # codebase/v2-current
 ROOT="$(cd ../.. && pwd)"                              # repo root
 
-MODEL_ID=${MODEL_ID:-qwen3.8-27b@4bit}
-BASE=${LMSTUDIO_BASE:-http://localhost:1234/v1}
+MODEL_ID=${MODEL_ID:-Qwen3.8-27B-8bit}
+MODEL_DIR=${MODEL_DIR:-$HOME/AI/Models/lmstudio/sephwa}
+OMLX_PORT=${OMLX_PORT:-8010}
+OMLX_KEY=${OMLX_KEY:-local-test}
+BASE="http://127.0.0.1:$OMLX_PORT/v1"
 TAG=${TAG:-dungeon}
 BRIEF=${BRIEF:-escalation/dungeon_brief.md}
-UNLOAD=${UNLOAD:-1}
+ENGINES=${ENGINES:-"multiagent multiagent-nocheck refine bestof3 single"}
 RUN="$ROOT/runs/$TAG"
-mkdir -p "$RUN/play"
+ISO="$RUN/omlx"
+mkdir -p "$RUN/play" "$ISO/models"
 echo $$ > "$RUN/run.pid"
 
 export MULTIAGENT_MAX_ITERS=${MULTIAGENT_MAX_ITERS:-10}
 export MULTIAGENT_MAX_TASKS=12
+export REFINE_MAX_ROUNDS=${REFINE_MAX_ROUNDS:-6}
+export BESTOF_N=${BESTOF_N:-3}
 export ESCALATION_OPENAI_BASE="$BASE/chat/completions"
-export GROQ_API_KEY=lm-studio
-export ESCALATION_GROQ_REASONING=""
+export GROQ_API_KEY="$OMLX_KEY"          # the groq: route is the generic OpenAI-compatible path
+export ESCALATION_GROQ_REASONING=""      # send no reasoning_effort; Qwen thinks by default
 export ESCALATION_CLOUD_MAX_TOKENS=${CAP:-128000}
 export ESCALATION_CLOUD_TIMEOUT=${TIMEOUT:-21600}
 export MULTIAGENT_MODEL="groq:$MODEL_ID"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN/run.log"; }
 
-if ! curl -sf -m 10 "$BASE/models" > /dev/null; then
-  log "FATAL: LM Studio server not answering at $BASE"; exit 1
+# --- the model server -------------------------------------------------------------------
+if ! curl -sf -m 5 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" > /dev/null; then
+  log "starting oMLX on port $OMLX_PORT (private settings in $ISO)"
+  ln -sfn "$MODEL_DIR/$MODEL_ID" "$ISO/models/$MODEL_ID"
+  python3 - "$ISO" "$OMLX_PORT" "$MODEL_ID" <<'PY'
+import copy, json, os, sys
+iso, port, model = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+s = json.load(open(os.path.expanduser("~/.omlx/settings.json")))
+s["server"].update({"port": port, "auto_start_on_launch": False})
+s["model"]["model_dirs"] = [os.path.join(iso, "models")]
+json.dump(s, open(os.path.join(iso, "settings.json"), "w"), indent=2)
+ms = json.load(open(os.path.expanduser("~/.omlx/model_settings.json")))["models"]
+src = ms.get("Qwen3.8-27B-MTPLX-Optimized-Speed") or next(iter(ms.values()))
+e = copy.deepcopy(src)
+e.update({"max_context_window": 262144, "max_tokens": 131072, "ttl_seconds": 86400,
+          "mtp_enabled": False, "enable_thinking": True,
+          "turboquant_kv_enabled": False,      # 4-bit KV cache: speed for quality
+          "specprefill_enabled": False,        # draft-model prompt pruning: speed for quality
+          "thinking_budget_enabled": False})   # let it think as long as the paper's runs did
+e.pop("model_alias", None)
+e["chat_template_kwargs"] = {}
+json.dump({"version": 1, "models": {model: e}}, open(os.path.join(iso, "model_settings.json"), "w"), indent=2)
+PY
+  OMLX_BASE_PATH="$ISO" nohup /Applications/oMLX.app/Contents/MacOS/omlx-cli serve \
+    --model-dir "$ISO/models" --port "$OMLX_PORT" --base-path "$ISO" --api-key "$OMLX_KEY" \
+    > "$ISO/serve.log" 2>&1 &
+  echo $! > "$ISO/serve.pid"
+  for i in $(seq 120); do
+    curl -sf -m 2 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" > /dev/null && break
+    sleep 2
+  done
 fi
-# Always a fresh single-slot load: it also clears a backend left dead by an earlier crash.
-lms unload "$MODEL_ID" > /dev/null 2>&1
-log "loading $MODEL_ID (262k context, 1 slot)"
-lms load "$MODEL_ID" -c 262144 --parallel 1 -y > /dev/null 2>&1 || { log "FATAL: lms load failed"; exit 1; }
+curl -sf -m 5 -H "Authorization: Bearer $OMLX_KEY" "$BASE/models" | grep -q "$MODEL_ID" \
+  || { log "FATAL: oMLX is not serving $MODEL_ID on $BASE"; exit 1; }
+log "model server ready: $MODEL_ID on $BASE"
 
 caffeinate -i -w $$ &   # no idle sleep while this script runs
 
 { echo "sha=$(git rev-parse HEAD)"
-  echo "model=$MULTIAGENT_MODEL slots=1 cap=$ESCALATION_CLOUD_MAX_TOKENS max_iters=$MULTIAGENT_MAX_ITERS"
-  echo "brief=$BRIEF started=$(date '+%Y-%m-%d %H:%M')"
+  echo "model=$MULTIAGENT_MODEL base=$BASE cap=$ESCALATION_CLOUD_MAX_TOKENS max_iters=$MULTIAGENT_MAX_ITERS"
+  echo "engines=$ENGINES brief=$BRIEF started=$(date '+%Y-%m-%d %H:%M')"
 } > "$RUN/run_config.txt"
 
 arm() {
@@ -59,26 +105,30 @@ arm() {
   log "done  $eng (exit $?): $(tail -1 "$RUN/$eng.log")"
 }
 
-arm single
-arm multiagent
+for eng in $ENGINES; do arm "$eng"; done
 
-if [ -s "$RUN/single/game.html" ] && [ -s "$RUN/multiagent/game.html" ]; then
-  python3 - "$RUN" <<'PY'
+# --- shuffle the finished games for blind judging ----------------------------------------
+python3 - "$RUN" $ENGINES <<'PY'
 import json, os, random, shutil, sys
-run = sys.argv[1]
-arms = ["single", "multiagent"]
-random.shuffle(arms)
-for letter, arm in zip("AB", arms):
-    shutil.copy(os.path.join(run, arm, "game.html"), os.path.join(run, "play", f"dungeon-{letter}.html"))
-json.dump({"A": arms[0], "B": arms[1]}, open(os.path.join(run, "play", ".key.json"), "w"))
+run, engines = sys.argv[1], sys.argv[2:]
+have = [e for e in engines
+        if os.path.exists(os.path.join(run, e, "game.html"))
+        and os.path.getsize(os.path.join(run, e, "game.html")) > 0]
+random.shuffle(have)
+key = {}
+for letter, eng in zip("ABCDEFGH", have):
+    shutil.copy(os.path.join(run, eng, "game.html"), os.path.join(run, "play", f"game-{letter}.html"))
+    key[letter] = eng
+json.dump(key, open(os.path.join(run, "play", ".key.json"), "w"), indent=1)
+print(f"{len(have)} game(s) ready to play blind in {run}/play: " + ", ".join(sorted(key)))
 PY
-  level=info; msg="Both games are ready to play blind: $RUN/play (dungeon-A.html, dungeon-B.html)"
+n=$(ls "$RUN/play"/game-*.html 2>/dev/null | wc -l | tr -d ' ')
+if [ "$n" -ge 2 ]; then
+  level=info; msg="$n dungeon games ready to play blind in $RUN/play"
 else
-  level=warn; msg="Finished, but at least one arm produced no game. See $RUN/single.log and $RUN/multiagent.log"
+  level=warn; msg="Finished with only $n game(s); see $RUN/*.log"
 fi
 log "$msg"
-stentor notify -l "$level" -s gvs5h "Dungeon game build finished" "$msg" > /dev/null 2>&1 || true
-
-[ "$UNLOAD" = 1 ] && lms unload "$MODEL_ID" > /dev/null 2>&1
+stentor notify -l "$level" -s gvs5h "Dungeon game builds finished" "$msg" > /dev/null 2>&1 || true
 rm -f "$RUN/run.pid"
 log "finished"

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Build a single-file browser game with the paper's manager loop or with a single call.
+"""Build a single-file browser game with one of five scaffolds, all on the same model.
 
-    build_game.py --engine multiagent|single --brief escalation/dungeon_brief.md --out runs/dungeon/multiagent
+    build_game.py --engine <engine> --brief escalation/dungeon_brief.md --out runs/dungeon/<engine>
+
+    single            one call, no feedback -- the paper's baseline
+    multiagent        the paper's manager loop, with the browser check between rounds
+    multiagent-nocheck  the same loop with no check at all: decomposition and shared notes only
+    refine            one worker looped against the check -- feedback without a manager
+    bestof3           three independent single calls, keep whichever passes most checks
 
 The loop is multiagent.py as the paper runs it, pointed at a different artifact: workers write
-game.html instead of solution.py, and the manager's ground-truth signal is game_check's browser
-check instead of the public stdin tests. The single arm gets one call and no check, exactly as
-the single-call baseline does on LiveCodeBench; its game is checked only afterwards, for the
-record. Writes <out>/game.html, <out>/summary.json and the workspace under <out>/ws/.
+game.html instead of solution.py, and ground truth is game_check's headless-browser check
+instead of the public stdin tests. Writes <out>/game.html, <out>/summary.json and the
+workspace under <out>/ws/.
 """
 import argparse
 import json
@@ -19,8 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 SOLVER_SYSTEM = (
-    "You are an expert game developer who writes complete, polished browser games with "
-    "three.js. Build exactly what the brief asks for, and make it work on the first load. "
+    "an expert game developer who writes complete, polished browser games with three.js. "
+    "Build exactly what the brief asks for, and make it work on the first load. "
     "Output EXACTLY ONE complete, self-contained HTML file inside a single ```html ...``` "
     "fenced block, and nothing else after it."
 )
@@ -40,7 +45,8 @@ def _tokens(ws):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", choices=["multiagent", "single"], required=True)
+    ap.add_argument("--engine", required=True,
+                    choices=["single", "multiagent", "multiagent-nocheck", "refine", "bestof3"])
     ap.add_argument("--brief", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -49,11 +55,21 @@ def main():
     os.makedirs(out, exist_ok=True)
     os.environ["MULTIAGENT_WS"] = os.path.join(out, "ws")   # multiagent reads it at import
     import multiagent
+    import game_engines
     from game_check import check_game, NAME
 
     spec = {"kind": "code", "domain": "building browser games with three.js", "lang": "html",
             "artifact": "game.html", "check_name": NAME, "verify": check_game,
-            "solver_system": SOLVER_SYSTEM}
+            # the worker prompt reads "You are a WORKER subagent, <solver_system>"
+            "solver_system": "You are " + SOLVER_SYSTEM}
+    if args.engine == "multiagent-nocheck":
+        spec.pop("verify")
+
+    solve = {"single": multiagent.single_solve,
+             "multiagent": multiagent.multiagent_solve,
+             "multiagent-nocheck": multiagent.multiagent_solve,
+             "refine": game_engines.refine_solve,
+             "bestof3": game_engines.bestofn_solve}[args.engine]
     brief = open(args.brief).read()
 
     def log(msg):
@@ -61,20 +77,20 @@ def main():
 
     status, t0 = {}, time.time()
     log(f"engine={args.engine} model={multiagent.MODEL} max_iters={multiagent.MAX_ITERS}")
-    if args.engine == "multiagent":
-        multiagent.multiagent_solve(brief, spec, log=log, status_out=status)
-        html = open(os.path.join(status["ws"], "game.html")).read()
-    else:
-        raw = multiagent.single_solve(brief, spec, log=log, status_out=status)
-        html = multiagent._extract_py(raw, "html")
-
+    raw = solve(brief, spec, log=log, status_out=status)
+    html = multiagent._extract_py(raw, "html")
+    if not html.strip() and status.get("ws"):      # loop arms leave the artifact on disk
+        html = multiagent._read(status["ws"], "game.html")
     if html.strip():
         with open(os.path.join(out, "game.html"), "w") as f:
             f.write(html)
+
     result = check_game(out)
-    calls, toks = _tokens(status["ws"])
-    summary = {"engine": args.engine, "model": multiagent.MODEL, "minutes": round((time.time() - t0) / 60, 1),
-               "calls": calls, "completion_tokens": toks, "game_lines": html.count("\n") + 1 if html.strip() else 0,
+    calls, toks = _tokens(status.get("ws", ""))
+    summary = {"engine": args.engine, "model": multiagent.MODEL,
+               "minutes": round((time.time() - t0) / 60, 1), "calls": calls,
+               "completion_tokens": toks, "truncated_calls": status.get("truncated_calls"),
+               "game_lines": html.count("\n") + 1 if html.strip() else 0,
                "check": {k: result.get(k) for k in ("ran", "passed", "total", "checks", "error")}}
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
