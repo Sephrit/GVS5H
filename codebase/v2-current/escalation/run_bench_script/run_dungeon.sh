@@ -93,6 +93,8 @@ PY
     pid=$(cat "$ISO/serve.pid" 2>/dev/null) || return
     pkill -P "$pid" 2>/dev/null
     kill "$pid" 2>/dev/null
+    sleep 3
+    rm -rf "$ISO/cache"            # ~3 GB of prompt cache, and the disk has little room
   }
   trap cleanup EXIT               # never leave a server behind to confuse the next run
   for i in $(seq 120); do

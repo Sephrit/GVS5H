@@ -125,8 +125,13 @@ for spec in $QUANTS; do
     export MULTIAGENT_MODEL="groq:$model"
   fi
   while read -r qid; do one_problem "$label" "$qid"; done < <(python3 -c "import json;print('\n'.join(json.load(open('$IDS'))))")
-  if [ "$kind" = omlx ]; then stop_omlx; else lms unload --all > /dev/null 2>&1; fi
-  log "=== done $model"
+  if [ "$kind" = omlx ]; then
+    stop_omlx
+    rm -rf "$RUN/omlx-$model/cache"   # ~3 GB of prompt cache per server, and disk is tight
+  else
+    lms unload --all > /dev/null 2>&1
+  fi
+  log "=== done $model ($(df -g / | awk 'NR==2 {print $4}') GB free)"
 done
 
 python3 - "$RUN" $QUANTS <<'PY' | tee -a "$RUN/run.log"
