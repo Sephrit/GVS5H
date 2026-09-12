@@ -139,8 +139,10 @@ def omlx_row(model, mtp, out_dir):
 def lms_row(model, mtp):
     subprocess.run(["lms", "unload", "--all"], capture_output=True)
     flag = "--speculative-draft-mtp" if mtp else "--no-speculative-draft-mtp"
-    load = subprocess.run(["lms", "load", model, "-c", "262144", "--parallel", "1", flag, "-y"],
-                          capture_output=True, text=True)
+    # llama.cpp reserves the whole KV cache up front, so a 262k context asks for ~140 GB on the
+    # BF16 weights and the load is refused. MLX grows its cache as it goes and has no such limit.
+    load = subprocess.run(["lms", "load", model, "-c", os.environ.get("LMS_CTX", "32768"),
+                           "--parallel", "1", flag, "-y"], capture_output=True, text=True)
     if "successfully" not in (load.stdout + load.stderr):
         return {"error": "load failed: " + (load.stderr or load.stdout)[-200:]}
     try:

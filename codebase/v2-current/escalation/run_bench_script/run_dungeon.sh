@@ -9,8 +9,10 @@
 #   LM Studio 4-bit MLX       28.6 tok/s
 #   LM Studio Q8 GGUF + MTP   21.7 tok/s
 #   LM Studio 8-bit MLX       17.6 tok/s
-# MTP made no difference on oMLX (32.9 with and without on the same prompt), so it stays off;
-# the MTP-grafted copy in ~/AI/Models/oMLX/sephwa/Qwen3.8-27B-8bit-MTP is kept only as a record.
+# Measured per-row with a fresh server (runs/serving-matrix), MTP nearly doubles 8-bit decode:
+# 31.4 tok/s against 17.6. An earlier reading that showed no difference came from a server whose
+# setting had not taken effect. MTP is on, and it is lossless: on and off produce identical
+# greedy text on the same engine, so it buys speed at no cost to the result.
 # The server runs on a private port with its own settings folder, leaving the oMLX config
 # OpenCode uses untouched, and with turboquant KV, specprefill and the thinking budget off --
 # all three trade quality for speed.
@@ -76,7 +78,10 @@ ms = json.load(open(os.path.expanduser("~/.omlx/model_settings.json")))["models"
 src = ms.get("Qwen3.8-27B-MTPLX-Optimized-Speed") or next(iter(ms.values()))
 e = copy.deepcopy(src)
 e.update({"max_context_window": 262144, "max_tokens": 131072, "ttl_seconds": 86400,
-          "mtp_enabled": False, "enable_thinking": True,
+          # MTP nearly doubles decode here: 31.4 tok/s against 17.6 on the same weights and
+          # prompt (runs/serving-matrix). It is lossless -- MTP on and off produce identical
+          # greedy text on the same engine.
+          "mtp_enabled": True, "mtp_num_draft_tokens": 3, "enable_thinking": True,
           "turboquant_kv_enabled": False,      # 4-bit KV cache: speed for quality
           "specprefill_enabled": False,        # draft-model prompt pruning: speed for quality
           "thinking_budget_enabled": False})   # let it think as long as the paper's runs did
