@@ -26,7 +26,8 @@ free_gb() { df -g / | awk 'NR==2 {print $4}'; }
 caffeinate -i -w $$ &
 
 log "=== stage 1/4: quant quality (4-bit vs 8-bit, thinking off)"
-QUANTS="omlx:Qwen3.8-27B-8bit-MTP omlx:Qwen3.8-27B-4bit-MTP" PROBLEMS=8 CAP=16000 THINK=false \
+# 32k, not 16k: with thinking off answers still run 10-16k tokens, and 16k cut one of the first two.
+QUANTS="omlx:Qwen3.8-27B-8bit-MTP omlx:Qwen3.8-27B-4bit-MTP" PROBLEMS=8 CAP=32000 THINK=false \
   "$HERE/run_quant_trial.sh" >> "$ROOT/runs/quant-quality.log" 2>&1
 log "stage 1 done (exit $?), $(free_gb) GB free"
 note "Quant quality trial finished" info "$ROOT/runs/quant-quality/run.log"

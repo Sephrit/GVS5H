@@ -71,6 +71,8 @@ mtp, think = sys.argv[4] == "true", sys.argv[5] == "true"
 s = json.load(open(os.path.expanduser("~/.omlx/settings.json")))
 s["server"].update({"port": port, "auto_start_on_launch": False})
 s["model"]["model_dirs"] = [os.path.join(iso, "models")]
+# The inherited cap is 50 GB of prompt cache per server, which filled the disk mid-run.
+s.setdefault("cache", {})["ssd_cache_max_size"] = "2GB"
 json.dump(s, open(os.path.join(iso, "settings.json"), "w"), indent=2)
 ms = json.load(open(os.path.expanduser("~/.omlx/model_settings.json")))["models"]
 src = ms.get("Qwen3.8-27B-MTPLX-Optimized-Speed") or next(iter(ms.values()))
