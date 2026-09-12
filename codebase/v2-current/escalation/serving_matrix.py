@@ -32,15 +32,14 @@ KEY = "matrix-test"
 GAME_PROMPT = "Write a complete three.js first-person maze game in one HTML file."
 FIB_PROMPT = "Write a Python function fib(n) using fast doubling. Reply with only the code."
 
+# MTP-only: measured on these weights it nearly doubles decode (8-bit: 31.4 tok/s against 17.6)
+# and is lossless, so serving without it is a waste. The non-MTP rows from the first pass stay
+# in runs/serving-matrix/results.json as the evidence for that.
 ROWS = [
     ("oMLX 4-bit MLX + MTP", "omlx", "Qwen3.8-27B-4bit-MTP", True),
-    ("oMLX 4-bit MLX", "omlx", "Qwen3.8-27B-4bit-MTP", False),
     ("oMLX 8-bit MLX + MTP", "omlx", "Qwen3.8-27B-8bit-MTP", True),
-    ("oMLX 8-bit MLX", "omlx", "Qwen3.8-27B-8bit-MTP", False),
     ("LM Studio Q8 GGUF + MTP", "lms", "qwen3.8-27b@q8_k_xl", True),
-    ("LM Studio Q8 GGUF", "lms", "qwen3.8-27b@q8_k_xl", False),
     ("LM Studio BF16 GGUF + MTP", "lms", "qwen3.8-27b@bf16", True),
-    ("LM Studio BF16 GGUF", "lms", "qwen3.8-27b@bf16", False),
 ]
 
 

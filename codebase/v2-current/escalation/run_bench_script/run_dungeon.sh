@@ -28,8 +28,8 @@ set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1   # codebase/v2-current
 ROOT="$(cd ../.. && pwd)"                              # repo root
 
-MODEL_ID=${MODEL_ID:-Qwen3.8-27B-8bit}
-MODEL_DIR=${MODEL_DIR:-$HOME/AI/Models/lmstudio/sephwa}
+MODEL_ID=${MODEL_ID:-Qwen3.8-27B-8bit-MTP}          # the copy that carries the MTP head
+MODEL_DIR=${MODEL_DIR:-$HOME/AI/Models/oMLX/sephwa}
 OMLX_PORT=${OMLX_PORT:-8010}
 OMLX_KEY=${OMLX_KEY:-local-test}
 BASE="http://127.0.0.1:$OMLX_PORT/v1"
